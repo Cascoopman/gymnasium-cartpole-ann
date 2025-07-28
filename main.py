@@ -1,17 +1,18 @@
 import random
 from collections import deque
-
+import argparse
 import gymnasium as gym
 import torch
 import torch.nn.functional as F
 import torch.optim.adam
 from gymnasium.core import Env
-from torch import Tensor, nn
-from torch.utils.data import DataLoader
+from torch import nn
 
 
 class Net(nn.Module):
-    def __init__(self, input_dim: int = 4, output_dim: int = 2, hidden_layer: int = 64):
+    def __init__(
+        self, input_dim: int = 4, output_dim: int = 2, hidden_layer: int = 256
+    ):
         super(Net, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_layer)
         self.fc2 = nn.Linear(hidden_layer, hidden_layer)
@@ -24,36 +25,25 @@ class Net(nn.Module):
         x = self.fc2(x)
         x = F.relu(x)
 
-        x = self.fc3(x)
-
-        return F.softmax(x, dim=0)
+        return self.fc3(x)
 
     def get_action(self, state):
         return torch.argmax(self.forward(state)).item()
-
-    def backward(self, x_train: Tensor, target: Tensor, learning_rate):
-        self.forward(x_train)
-
-        loss = F.cross_entropy(input, target)
-        loss = loss.sum()
-
-        loss.backward()
-
-        optim = torch.optim.Adam(self.parameters(), lr=learning_rate)
-
-        optim.step()
 
 
 class Learner:
     def __init__(
         self,
-        num_iterations: int = 200,
-        memory_size: int = 2000,
+        num_iterations: int = 100000,
+        memory_size: int = 10000,
         render: bool = False,
-        e_rate: float = 0.80,
-        e_decay: float = 0.90,
-        batch_size: int = 64,
+        e_rate: float = 1.0,
+        e_decay: float = 0.995,
+        batch_size: int = 32,
         learning_rate: float = 1e-3,
+        weight_decay: float = 1e-5,
+        target_update: int = 100,
+        minimum_score: int = 1000,
     ) -> None:
         self.env: Env = gym.make("CartPole-v1", render_mode="human" if render else None)
         self.render = render
@@ -61,25 +51,64 @@ class Learner:
         self.memory_size = memory_size
         self.memory = deque(maxlen=memory_size)
         self.net = Net()
+        self.target_net = Net()  # Target network for stability
+        self.target_net.load_state_dict(self.net.state_dict())
+        self.optimizer = torch.optim.Adam(
+            self.net.parameters(), lr=learning_rate, weight_decay=weight_decay
+        )
         self.e_rate = e_rate
         self.e_decay = e_decay
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.target_update = target_update
+        self.update_count = 0
+        self.minimum_score = minimum_score
 
     def learn(self) -> None:
-        mini_batch = random.sample(self.memory, min(len(self.memory)), self.batch_size)
+        if len(self.memory) < self.batch_size:
+            return
 
-        raise NotImplementedError
+        mini_batch = random.sample(self.memory, self.batch_size)
 
-        # training_data = []
+        x_train, y_train = [], []
 
-        # for state, action, observation, done in mini_batch:
-        #     break
-        # test = DataLoader(self.memory, batch_size=self.batch_size)
+        for state, action, reward, observation, done in mini_batch:
+            # Get current Q-values
+            current_q_values = self.net.forward(state)
 
-        # self.net.backward(mini_batch, test, self.learning_rate)
-        # self.e_rate = self.e_rate * self.e_decay
-        # self.memory.clear()
+            # Create target Q-values (copy current values)
+            target_q_values = current_q_values.clone()
+
+            if not done:
+                # Get next state Q-values using target network
+                next_q_values = self.target_net.forward(observation)
+                # Update target for the action taken using Q-learning update rule
+                target_q_values[action] = reward + 0.99 * torch.max(next_q_values)
+            else:
+                # If episode is done, set target to the actual reward
+                target_q_values[action] = reward
+
+            x_train.append(state)
+            y_train.append(target_q_values)
+
+        x_batch = torch.stack(x_train)
+        y_batch = torch.stack(y_train)
+
+        # Forward pass
+        predictions = self.net.forward(x_batch)
+
+        # Calculate MSE loss for Q-learning
+        loss = F.mse_loss(predictions, y_batch)
+
+        # Backward pass
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        # Update target network periodically
+        self.update_count += 1
+        if self.update_count % self.target_update == 0:
+            self.target_net.load_state_dict(self.net.state_dict())
 
     def run(self) -> None:
         for i in range(self.num_iterations):
@@ -90,7 +119,7 @@ class Learner:
             4. pole velocity at tip
             """
             state, _ = self.env.reset()
-            state = torch.from_numpy(state)
+            state = torch.from_numpy(state).float()
 
             done = False
             score = 0
@@ -102,33 +131,78 @@ class Learner:
                     action = self.env.action_space.sample()
 
                 obs, reward, terminated, _, _ = self.env.step(action)
-
+                observation = torch.from_numpy(obs).float()
                 score += reward
 
-                self.memory.append((state, action, obs, done))
+                self.memory.append((state, action, reward, observation, terminated))
 
                 if self.render:
                     self.env.render()
 
-                state = torch.from_numpy(obs)
-
-                if score == 500:
-                    print("Working model found - saving to disk.")
-                    torch.save(self.net.state_dict(), "data")
-                    done = True
-                    break
+                state = observation
 
                 if terminated:
                     break
 
-            if len(self.memory) == self.memory_size:
+            if score >= self.minimum_score:
+                print("Working model found - saving to disk.")
+                torch.save(self.net.state_dict(), "data/model.pth")
+                done = True
+                break
+
+
+            # Learn every episode if we have enough samples
+            if len(self.memory) >= self.batch_size:
                 self.learn()
 
+            # Decay epsilon
+            self.e_rate = max(0.01, self.e_rate * self.e_decay)
+
             print(
-                "Attempt ", i, " - Score ", score, " - Memory size ", len(self.memory)
+                f"Attempt {i} - Score {score} - Memory size {len(self.memory)} - Epsilon {self.e_rate:.3f}"
             )
 
 
+class Visualizer:
+    def __init__(self, model_path: str) -> None:
+        self.model = Net()
+        self.model.load_state_dict(torch.load(model_path))
+        self.env = gym.make("CartPole-v1", render_mode="human")
+        
+    def run(self) -> None:
+        state, _ = self.env.reset()
+        state = torch.from_numpy(state).float()
+        
+        done = False
+        score = 0
+        
+        while not done:
+            action = self.model.get_action(state)
+            obs, reward, terminated, _, _ = self.env.step(action)
+            observation = torch.from_numpy(obs).float()
+            score += reward
+            self.env.render()
+            state = observation
+            
+            if terminated:
+                break
+            
+        print(f"Score: {score}")
+        
+    def close(self) -> None:
+        self.env.close()
+
 if __name__ == "__main__":
-    learner = Learner(render=False)
-    learner.run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", type=str, required=True)
+    args = parser.parse_args()
+    if args.mode == "train":
+        learner = Learner()
+        learner.run()
+    elif args.mode == "visualize":
+        visualizer = Visualizer("data/model.pth")
+        visualizer.run()
+        visualizer.close()
+    else:
+        print("Usage: python main.py --mode train")
+        print("Usage: python main.py --mode visualize")
