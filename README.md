@@ -16,3 +16,4 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 ```
 
+Partially based on Rich Wandell's [post](https://www.youtube.com/watch?v=0Vpnbiwn9M0)
