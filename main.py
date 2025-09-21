@@ -1,24 +1,30 @@
+"""Simple Q-learning implementation for the CartPole-v1 environment."""
+
+import argparse
+import logging
 import random
 from collections import deque
-import argparse
+from typing import TYPE_CHECKING
+
 import gymnasium as gym
 import torch
-import torch.nn.functional as F
-import torch.optim.adam
-from gymnasium.core import Env
+import torch.nn.functional as F  # noqa: N812
+
+if TYPE_CHECKING:
+    from gymnasium.core import Env
 from torch import nn
 
+logger = logging.getLogger(__name__)
 
-class Net(nn.Module):
-    def __init__(
-        self, input_dim: int = 4, output_dim: int = 2, hidden_layer: int = 256
-    ):
-        super(Net, self).__init__()
+
+class Net(nn.Module):  # noqa: D101
+    def __init__(self, input_dim: int = 4, output_dim: int = 2, hidden_layer: int = 256) -> None:  # noqa: D107
+        super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_layer)
         self.fc2 = nn.Linear(hidden_layer, hidden_layer)
         self.fc3 = nn.Linear(hidden_layer, output_dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # noqa: D102
         x = self.fc1(x)
         x = F.relu(x)
 
@@ -27,12 +33,12 @@ class Net(nn.Module):
 
         return self.fc3(x)
 
-    def get_action(self, state):
+    def get_action(self, state: torch.Tensor) -> int:  # noqa: D102
         return torch.argmax(self.forward(state)).item()
 
 
-class Learner:
-    def __init__(
+class Learner:  # noqa: D101
+    def __init__(  # noqa: D107, PLR0913
         self,
         num_iterations: int = 100000,
         memory_size: int = 10000,
@@ -53,9 +59,7 @@ class Learner:
         self.net = Net()
         self.target_net = Net()  # Target network for stability
         self.target_net.load_state_dict(self.net.state_dict())
-        self.optimizer = torch.optim.Adam(
-            self.net.parameters(), lr=learning_rate, weight_decay=weight_decay
-        )
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.e_rate = e_rate
         self.e_decay = e_decay
         self.batch_size = batch_size
@@ -64,11 +68,11 @@ class Learner:
         self.update_count = 0
         self.minimum_score = minimum_score
 
-    def learn(self) -> None:
+    def learn(self) -> None:  # noqa: D102
         if len(self.memory) < self.batch_size:
             return
 
-        mini_batch = random.sample(self.memory, self.batch_size)
+        mini_batch = random.sample(self.memory, self.batch_size)  # nosec: B311
 
         x_train, y_train = [], []
 
@@ -110,7 +114,7 @@ class Learner:
         if self.update_count % self.target_update == 0:
             self.target_net.load_state_dict(self.net.state_dict())
 
-    def run(self) -> None:
+    def run(self) -> None:  # noqa: D102
         for i in range(self.num_iterations):
             """
             1. cart position
@@ -145,11 +149,10 @@ class Learner:
                     break
 
             if score >= self.minimum_score:
-                print("Working model found - saving to disk.")
+                logger.info("Working model found - saving to disk.")
                 torch.save(self.net.state_dict(), "data/model.pth")
                 done = True
                 break
-
 
             # Learn every episode if we have enough samples
             if len(self.memory) >= self.batch_size:
@@ -158,24 +161,23 @@ class Learner:
             # Decay epsilon
             self.e_rate = max(0.01, self.e_rate * self.e_decay)
 
-            print(
-                f"Attempt {i} - Score {score} - Memory size {len(self.memory)} - Epsilon {self.e_rate:.3f}"
-            )
+            logger.info("Attempt %s - Score %s - Memory size %s - Epsilon %s", i, score, len(self.memory), self.e_rate)
 
 
-class Visualizer:
-    def __init__(self, model_path: str) -> None:
+class Visualizer:  # noqa: D101
+    def __init__(self, model_path: str) -> None:  # noqa: D107
         self.model = Net()
-        self.model.load_state_dict(torch.load(model_path))
+        state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+        self.model.load_state_dict(state_dict)
         self.env = gym.make("CartPole-v1", render_mode="human")
-        
-    def run(self) -> None:
+
+    def run(self) -> None:  # noqa: D102
         state, _ = self.env.reset()
         state = torch.from_numpy(state).float()
-        
+
         done = False
         score = 0
-        
+
         while not done:
             action = self.model.get_action(state)
             obs, reward, terminated, _, _ = self.env.step(action)
@@ -183,14 +185,15 @@ class Visualizer:
             score += reward
             self.env.render()
             state = observation
-            
+
             if terminated:
                 break
-            
-        print(f"Score: {score}")
-        
-    def close(self) -> None:
+
+        logger.info("Score: %s", score)
+
+    def close(self) -> None:  # noqa: D102
         self.env.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -204,5 +207,5 @@ if __name__ == "__main__":
         visualizer.run()
         visualizer.close()
     else:
-        print("Usage: python main.py --mode train")
-        print("Usage: python main.py --mode visualize")
+        logger.error("Usage: python main.py --mode train")
+        logger.error("Usage: python main.py --mode visualize")
